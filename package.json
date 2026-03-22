@@ -1,0 +1,32 @@
+{
+  "name": "meeting-attendance-monitor",
+  "version": "1.0.0",
+  "description": "Monitors Google Meet attendance and sends Slack reminders to non-attendees",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test-local.js",
+    "deploy": "gcloud functions deploy checkMeetingAttendance --runtime nodejs20 --trigger-http --allow-unauthenticated --entry-point checkMeetingAttendance --env-vars-file .env.yaml --region us-central1 --memory 256MB --timeout 540s",
+    "logs": "gcloud functions logs read checkMeetingAttendance --limit 50",
+    "logs:tail": "gcloud functions logs read checkMeetingAttendance --limit 50 --follow"
+  },
+  "keywords": [
+    "google-meet",
+    "slack",
+    "attendance",
+    "notifications"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/secret-manager": "^5.0.0",
+    "@slack/web-api": "^7.0.0",
+    "googleapis": "^134.0.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

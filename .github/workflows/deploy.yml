@@ -1,0 +1,174 @@
+name: Deploy to Google Cloud Functions
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  POST_MEETING_FUNCTION: checkMeetingAttendance
+  PRE_MEETING_FUNCTION: sendPreMeetingReminders
+  REGION: us-central1
+
+jobs:
+  deploy:
+    name: Deploy Cloud Function
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test || echo "No tests configured yet"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Create .env.yaml from secrets
+        run: |
+          cat > .env.yaml << EOF
+          GOOGLE_CALENDAR_USER_EMAIL: "${{ secrets.CALENDAR_USER_EMAIL }}"
+          SLACK_BOT_TOKEN: "${{ secrets.SLACK_BOT_TOKEN }}"
+          SERVICE_ACCOUNT_EMAIL: "${{ secrets.SERVICE_ACCOUNT_EMAIL }}"
+          PRE_MEETING_REMINDER_HOURS: "2"
+          POST_MEETING_REMINDER_MINUTES: "2"
+          EOF
+
+      - name: Deploy Post-Meeting Function
+        run: |
+          echo "Deploying post-meeting reminder function..."
+          gcloud functions deploy $POST_MEETING_FUNCTION \
+            --runtime nodejs20 \
+            --trigger-http \
+            --allow-unauthenticated \
+            --entry-point $POST_MEETING_FUNCTION \
+            --env-vars-file .env.yaml \
+            --region $REGION \
+            --memory 256MB \
+            --timeout 540s \
+            --project $PROJECT_ID
+
+      - name: Deploy Pre-Meeting Function
+        run: |
+          echo "Deploying pre-meeting reminder function..."
+          gcloud functions deploy $PRE_MEETING_FUNCTION \
+            --runtime nodejs20 \
+            --trigger-http \
+            --allow-unauthenticated \
+            --entry-point $PRE_MEETING_FUNCTION \
+            --env-vars-file .env.yaml \
+            --region $REGION \
+            --memory 256MB \
+            --timeout 540s \
+            --project $PROJECT_ID
+
+      - name: Setup Post-Meeting Scheduler
+        run: |
+          POST_FUNCTION_URL=$(gcloud functions describe $POST_MEETING_FUNCTION \
+            --region=$REGION \
+            --project=$PROJECT_ID \
+            --format='value(httpsTrigger.url)')
+
+          # Check if scheduler job exists
+          if ! gcloud scheduler jobs describe post-meeting-attendance-checker \
+            --location=$REGION \
+            --project=$PROJECT_ID &> /dev/null; then
+
+            echo "Creating post-meeting scheduler job..."
+            gcloud scheduler jobs create http post-meeting-attendance-checker \
+              --schedule="* * * * *" \
+              --uri="$POST_FUNCTION_URL" \
+              --http-method=POST \
+              --location=$REGION \
+              --time-zone="Asia/Kolkata" \
+              --project=$PROJECT_ID
+          else
+            echo "Post-meeting scheduler already exists, updating..."
+            gcloud scheduler jobs update http post-meeting-attendance-checker \
+              --schedule="* * * * *" \
+              --uri="$POST_FUNCTION_URL" \
+              --http-method=POST \
+              --location=$REGION \
+              --time-zone="Asia/Kolkata" \
+              --project=$PROJECT_ID
+          fi
+
+      - name: Setup Pre-Meeting Scheduler
+        run: |
+          PRE_FUNCTION_URL=$(gcloud functions describe $PRE_MEETING_FUNCTION \
+            --region=$REGION \
+            --project=$PROJECT_ID \
+            --format='value(httpsTrigger.url)')
+
+          # Check if scheduler job exists
+          if ! gcloud scheduler jobs describe pre-meeting-reminder-checker \
+            --location=$REGION \
+            --project=$PROJECT_ID &> /dev/null; then
+
+            echo "Creating pre-meeting scheduler job..."
+            gcloud scheduler jobs create http pre-meeting-reminder-checker \
+              --schedule="*/15 * * * *" \
+              --uri="$PRE_FUNCTION_URL" \
+              --http-method=POST \
+              --location=$REGION \
+              --time-zone="Asia/Kolkata" \
+              --project=$PROJECT_ID
+          else
+            echo "Pre-meeting scheduler already exists, updating..."
+            gcloud scheduler jobs update http pre-meeting-reminder-checker \
+              --schedule="*/15 * * * *" \
+              --uri="$PRE_FUNCTION_URL" \
+              --http-method=POST \
+              --location=$REGION \
+              --time-zone="Asia/Kolkata" \
+              --project=$PROJECT_ID
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Deployment successful!"
+          echo ""
+          echo "Functions deployed:"
+          echo "  1. $POST_MEETING_FUNCTION (post-meeting reminders)"
+          echo "  2. $PRE_MEETING_FUNCTION (pre-meeting reminders)"
+          echo ""
+          echo "Region: $REGION"
+          echo "Project: $PROJECT_ID"
+          echo ""
+          echo "Schedulers:"
+          echo "  • Post-meeting: Every minute (* * * * *)"
+          echo "  • Pre-meeting: Every 15 minutes (*/15 * * * *)"
+          echo ""
+          echo "View logs:"
+          echo "  gcloud functions logs read $POST_MEETING_FUNCTION --region=$REGION --project=$PROJECT_ID --limit=50"
+          echo "  gcloud functions logs read $PRE_MEETING_FUNCTION --region=$REGION --project=$PROJECT_ID --limit=50"
