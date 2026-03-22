@@ -1,0 +1,93 @@
+name: Deploy to Google Cloud
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Deploy Post-Meeting Reminder Function
+        run: |
+          gcloud functions deploy checkMeetingAttendance \
+            --gen2 \
+            --runtime=nodejs20 \
+            --region=us-central1 \
+            --source=. \
+            --entry-point=checkMeetingAttendance \
+            --trigger-http \
+            --allow-unauthenticated \
+            --set-env-vars="GOOGLE_CALENDAR_USER_EMAIL=${{ secrets.GOOGLE_CALENDAR_USER_EMAIL }},PRE_MEETING_REMINDER_HOURS=2,POST_MEETING_REMINDER_MINUTES=2" \
+            --set-secrets="GOOGLE_APPLICATION_CREDENTIALS=service-account-key:latest" \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy Pre-Meeting Reminder Function
+        run: |
+          gcloud functions deploy sendPreMeetingReminders \
+            --gen2 \
+            --runtime=nodejs20 \
+            --region=us-central1 \
+            --source=. \
+            --entry-point=sendPreMeetingReminders \
+            --trigger-http \
+            --allow-unauthenticated \
+            --set-env-vars="GOOGLE_CALENDAR_USER_EMAIL=${{ secrets.GOOGLE_CALENDAR_USER_EMAIL }},PRE_MEETING_REMINDER_HOURS=2,POST_MEETING_REMINDER_MINUTES=2" \
+            --set-secrets="GOOGLE_APPLICATION_CREDENTIALS=service-account-key:latest" \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Create Post-Meeting Scheduler (Every Minute)
+        run: |
+          gcloud scheduler jobs create http meeting-monitor-post \
+            --location=us-central1 \
+            --schedule="* * * * *" \
+            --uri="$(gcloud functions describe checkMeetingAttendance --region=us-central1 --format='value(serviceConfig.uri)' --project=${{ secrets.GCP_PROJECT_ID }})" \
+            --http-method=POST \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --time-zone="Asia/Kolkata" \
+            || echo "Scheduler already exists"
+
+      - name: Create Pre-Meeting Scheduler (Every 15 Minutes)
+        run: |
+          gcloud scheduler jobs create http meeting-monitor-pre \
+            --location=us-central1 \
+            --schedule="*/15 * * * *" \
+            --uri="$(gcloud functions describe sendPreMeetingReminders --region=us-central1 --format='value(serviceConfig.uri)' --project=${{ secrets.GCP_PROJECT_ID }})" \
+            --http-method=POST \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --time-zone="Asia/Kolkata" \
+            || echo "Scheduler already exists"
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployment complete!"
+          echo ""
+          echo "Post-Meeting Function:"
+          gcloud functions describe checkMeetingAttendance --region=us-central1 --format='value(serviceConfig.uri)' --project=${{ secrets.GCP_PROJECT_ID }}
+          echo ""
+          echo "Pre-Meeting Function:"
+          gcloud functions describe sendPreMeetingReminders --region=us-central1 --format='value(serviceConfig.uri)' --project=${{ secrets.GCP_PROJECT_ID }}
+          echo ""
+          echo "Schedulers:"
+          echo "- Post-meeting: Every minute"
+          echo "- Pre-meeting: Every 15 minutes"
